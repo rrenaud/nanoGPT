@@ -5,7 +5,8 @@ import os
 import pickle
 from contextlib import nullcontext
 import torch
-import tiktoken
+
+from tokenizer_loader import build_tokenizer
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
@@ -20,6 +21,8 @@ seed = 1337
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
+tokenizer = 'gpt2'
+tokenizer_repo = None
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
@@ -62,16 +65,31 @@ if load_meta:
     print(f"Loading meta from {meta_path}...")
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
-    # TODO want to make this more general to arbitrary encoder/decoder schemes
-    stoi, itos = meta['stoi'], meta['itos']
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda l: ''.join([itos[i] for i in l])
+    if 'stoi' in meta and 'itos' in meta:
+        # Character-level datasets keep explicit vocab maps.
+        stoi, itos = meta['stoi'], meta['itos']
+        encode = lambda s: [stoi[c] for c in s]
+        decode = lambda l: ''.join([itos[i] for i in l])
+    elif 'tokenizer' in meta:
+        tokenizer_spec = build_tokenizer(
+            meta['tokenizer'],
+            tokenizer_repo=meta.get('tokenizer_repo'),
+        )
+        encode = tokenizer_spec.encode_prompt
+        decode = tokenizer_spec.decode
+    else:
+        raise ValueError(
+            f"Unsupported meta.pkl format. Keys: {list(meta.keys())}"
+        )
 else:
-    # ok let's assume gpt-2 encodings by default
-    print("No meta.pkl found, assuming GPT-2 encodings...")
-    enc = tiktoken.get_encoding("gpt2")
-    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-    decode = lambda l: enc.decode(l)
+    # Fall back to the configured tokenizer.
+    print(f"No meta.pkl found, assuming tokenizer '{tokenizer}'...")
+    tokenizer_spec = build_tokenizer(
+        tokenizer,
+        tokenizer_repo=tokenizer_repo,
+    )
+    encode = tokenizer_spec.encode_prompt
+    decode = tokenizer_spec.decode
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):

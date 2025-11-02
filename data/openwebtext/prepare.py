@@ -1,11 +1,23 @@
-# saves the openwebtext dataset to a binary file for training. following was helpful:
-# https://github.com/HazyResearch/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py
+"""
+Prepare the OpenWebText dataset and serialize it with a configurable tokenizer.
+"""
 
+import argparse
 import os
-from tqdm import tqdm
+import pickle
+
 import numpy as np
-import tiktoken
-from datasets import load_dataset # huggingface datasets
+from datasets import load_dataset  # huggingface datasets
+from tqdm import tqdm
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tokenizer_loader import build_tokenizer
 
 # number of workers in .map() call
 # good number to use is ~order number of cpu cores // 2
@@ -16,9 +28,27 @@ num_proc = 8
 # it is better than 1 usually though
 num_proc_load_dataset = num_proc
 
-enc = tiktoken.get_encoding("gpt2")
-
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--tokenizer",
+        choices=("gpt2", "superbpe"),
+        default="gpt2",
+        help="Tokenizer to use when encoding the dataset.",
+    )
+    parser.add_argument(
+        "--tokenizer_repo",
+        default=None,
+        help="Optional HuggingFace repository id for tokenizer assets (SuperBPE only).",
+    )
+    args = parser.parse_args()
+
+    tokenizer = build_tokenizer(
+        args.tokenizer,
+        tokenizer_repo=args.tokenizer_repo,
+    )
+    print(f"Using tokenizer '{tokenizer.name}' (EOS id {tokenizer.eos_token_id})")
+
     # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
     dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
 
@@ -41,8 +71,8 @@ if __name__ == '__main__':
 
     # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
     def process(example):
-        ids = enc.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
-        ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
+        ids = tokenizer.encode_ordinary(example['text'])  # ignores any special tokens
+        ids.append(tokenizer.eos_token_id)  # add end of text token
         # note: I think eot should be prepended not appended... hmm. it's called "eot" though...
         out = {'ids': ids, 'len': len(ids)}
         return out
@@ -56,11 +86,16 @@ if __name__ == '__main__':
     )
 
     # concatenate all the ids in each dataset into one large file we can use for training
+    token_dtype = (
+        np.uint16
+        if tokenizer.max_token_id <= np.iinfo(np.uint16).max
+        else np.uint32
+    )
+
     for split, dset in tokenized.items():
         arr_len = np.sum(dset['len'], dtype=np.uint64)
         filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
-        dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
-        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
+        arr = np.memmap(filename, dtype=token_dtype, mode='w+', shape=(arr_len,))
         total_batches = 1024
 
         idx = 0
@@ -72,6 +107,19 @@ if __name__ == '__main__':
             arr[idx : idx + len(arr_batch)] = arr_batch
             idx += len(arr_batch)
         arr.flush()
+
+    dtype_name = np.dtype(token_dtype).name
+    meta = {
+        'tokenizer': tokenizer.name,
+        'tokenizer_repo': args.tokenizer_repo,
+        'eos_token_id': tokenizer.eos_token_id,
+        'max_token_id': tokenizer.max_token_id,
+        'dtype': dtype_name,
+        'vocab_size': tokenizer.vocab_size,
+    }
+    meta_path = os.path.join(os.path.dirname(__file__), 'meta.pkl')
+    with open(meta_path, 'wb') as f:
+        pickle.dump(meta, f)
 
     # train.bin is ~17GB, val.bin ~8.5MB
     # train has ~9B tokens (9,035,582,198)

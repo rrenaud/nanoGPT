@@ -150,7 +150,7 @@ However, we have to note that GPT-2 was trained on (closed, never released) WebT
 
 ## finetuning
 
-Finetuning is no different than training, we just make sure to initialize from a pretrained model and train with a smaller learning rate. For an example of how to finetune a GPT on new text go to `data/shakespeare` and run `prepare.py` to download the tiny shakespeare dataset and render it into a `train.bin` and `val.bin`, using the OpenAI BPE tokenizer from GPT-2. Unlike OpenWebText this will run in seconds. Finetuning can take very little time, e.g. on a single GPU just a few minutes. Run an example finetuning like:
+Finetuning is no different than training, we just make sure to initialize from a pretrained model and train with a smaller learning rate. For an example of how to finetune a GPT on new text go to `data/shakespeare` and run `prepare.py` to download the tiny shakespeare dataset and render it into a `train.bin` and `val.bin`, using the OpenAI BPE tokenizer from GPT-2 by default. Unlike OpenWebText this will run in seconds. The data preparation scripts now support HuggingFace's SuperBPE tokenizer as well, e.g. `python data/shakespeare/prepare.py --tokenizer=superbpe`. Finetuning can take very little time, e.g. on a single GPU just a few minutes. Run an example finetuning like:
 
 ```sh
 python train.py config/finetune_shakespeare.py
