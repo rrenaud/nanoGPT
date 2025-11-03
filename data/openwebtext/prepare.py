@@ -1,5 +1,6 @@
 """
-Prepare the OpenWebText dataset and serialize it with a configurable tokenizer.
+Prepare the OpenWebText (or TinyStories) dataset and serialize it with a
+configurable tokenizer.
 """
 
 import argparse
@@ -7,7 +8,7 @@ import os
 import pickle
 
 import numpy as np
-from datasets import load_dataset  # huggingface datasets
+from datasets import DatasetDict, load_dataset  # huggingface datasets
 from tqdm import tqdm
 
 import sys
@@ -28,6 +29,24 @@ num_proc = 8
 # it is better than 1 usually though
 num_proc_load_dataset = num_proc
 
+DATASETS = {
+    "openwebtext": {
+        "hf_id": "openwebtext",
+        "train_split": "train",
+        "val_split": None,
+        "text_field": "text",
+        "val_holdout": 0.0005,
+    },
+    "tinystories": {
+        "hf_id": "roneneldan/TinyStories",
+        "train_split": "train",
+        "val_split": "validation",
+        "text_field": "text",
+        "val_holdout": None,
+    },
+}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -41,7 +60,20 @@ if __name__ == '__main__':
         default=None,
         help="Optional HuggingFace repository id for tokenizer assets (SuperBPE only).",
     )
+    parser.add_argument(
+        "--dataset",
+        choices=tuple(DATASETS.keys()),
+        default="openwebtext",
+        help="Which dataset to download and tokenize.",
+    )
+    parser.add_argument(
+        "--out_dir",
+        default=None,
+        help="Destination directory for tokenized files (defaults to data/<dataset>).",
+    )
     args = parser.parse_args()
+
+    dataset_cfg = DATASETS[args.dataset]
 
     tokenizer = build_tokenizer(
         args.tokenizer,
@@ -49,29 +81,38 @@ if __name__ == '__main__':
     )
     print(f"Using tokenizer '{tokenizer.name}' (EOS id {tokenizer.eos_token_id})")
 
-    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
-    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
+    load_kwargs = {}
+    if dataset_cfg["hf_id"] == "openwebtext":
+        load_kwargs["num_proc"] = num_proc_load_dataset
+    dataset = load_dataset(dataset_cfg["hf_id"], **load_kwargs)
 
-    # owt by default only contains the 'train' split, so create a test split
-    split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
-    split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
+    if dataset_cfg["val_split"] and dataset_cfg["val_split"] in dataset:
+        split_dataset = DatasetDict(
+            {
+                "train": dataset[dataset_cfg["train_split"]],
+                "val": dataset[dataset_cfg["val_split"]],
+            }
+        )
+    else:
+        train_split = dataset[dataset_cfg["train_split"]]
+        holdout = dataset_cfg["val_holdout"] or 0.01
+        split_dataset = train_split.train_test_split(
+            test_size=holdout, seed=2357, shuffle=True
+        )
+        split_dataset["val"] = split_dataset.pop("test")
 
-    # this results in:
-    # >>> split_dataset
-    # DatasetDict({
-    #     train: Dataset({
-    #         features: ['text'],
-    #         num_rows: 8009762
-    #     })
-    #     val: Dataset({
-    #         features: ['text'],
-    #         num_rows: 4007
-    #     })
-    # })
+    output_dir = (
+        Path(args.out_dir).resolve()
+        if args.out_dir is not None
+        else REPO_ROOT / "data" / args.dataset
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
     def process(example):
-        ids = tokenizer.encode_ordinary(example['text'])  # ignores any special tokens
+        ids = tokenizer.encode_ordinary(
+            example[dataset_cfg["text_field"]]
+        )  # ignores any special tokens
         ids.append(tokenizer.eos_token_id)  # add end of text token
         # note: I think eot should be prepended not appended... hmm. it's called "eot" though...
         out = {'ids': ids, 'len': len(ids)}
@@ -80,7 +121,7 @@ if __name__ == '__main__':
     # tokenize the dataset
     tokenized = split_dataset.map(
         process,
-        remove_columns=['text'],
+        remove_columns=[dataset_cfg["text_field"]],
         desc="tokenizing the splits",
         num_proc=num_proc,
     )
@@ -94,7 +135,7 @@ if __name__ == '__main__':
 
     for split, dset in tokenized.items():
         arr_len = np.sum(dset['len'], dtype=np.uint64)
-        filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
+        filename = os.path.join(output_dir, f'{split}.bin')
         arr = np.memmap(filename, dtype=token_dtype, mode='w+', shape=(arr_len,))
         total_batches = 1024
 
@@ -117,7 +158,7 @@ if __name__ == '__main__':
         'dtype': dtype_name,
         'vocab_size': tokenizer.vocab_size,
     }
-    meta_path = os.path.join(os.path.dirname(__file__), 'meta.pkl')
+    meta_path = os.path.join(output_dir, 'meta.pkl')
     with open(meta_path, 'wb') as f:
         pickle.dump(meta, f)
 
